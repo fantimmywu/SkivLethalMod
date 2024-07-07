@@ -7,6 +7,7 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.Controls;
 using SkivMultimod.Patches;
+using SkivMod;
 
 namespace SkivMod
 {
@@ -14,18 +15,31 @@ namespace SkivMod
     {
         public const string PLUGIN_GUID = "Skiv.Multimod";
         public const string PLUGIN_NAME = "Multimods";
-        public const string PLUGIN_VERSION = "1.0.0";
+        public const string PLUGIN_VERSION = "1.2.0";
     }
 
     [BepInPlugin(PLUGIN_INFO.PLUGIN_GUID, PLUGIN_INFO.PLUGIN_NAME, PLUGIN_INFO.PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
-        private readonly Harmony harmony = new Harmony(PLUGIN_INFO.PLUGIN_GUID);
+        public static Harmony harmony = new Harmony(PLUGIN_INFO.PLUGIN_GUID);
         internal static ManualLogSource mls;
 
         // Configs
         private InputAction insertKeyAction;
-        private static ConfigEntry<string> speedKeyBind;
+        private static ConfigEntry<string> modKeyBind;
+
+        // Speed
+        public static ConfigEntry<bool> enableSpeedMod;
+        public static ConfigEntry<bool> enableStaminaMod;
+        public static ConfigEntry<float> moveSpeedValue;
+        // Jump
+        public static ConfigEntry<bool> enableJumpMod;
+        public static ConfigEntry<int> maxJumpLimit;
+        public static ConfigEntry<bool> noFallToggle;
+        // Reach
+        public static ConfigEntry<bool> enableReachMod;
+        // God
+        public static ConfigEntry<bool> enableGodMod;
 
         private void Awake()
         {
@@ -35,13 +49,13 @@ namespace SkivMod
             setBinding();
 
             // Enable keybindings
-            insertKeyAction = new InputAction(binding: $"<Keyboard>/{speedKeyBind.Value}");
+            insertKeyAction = new InputAction(binding: $"<Keyboard>/{modKeyBind.Value}");
             insertKeyAction.performed += OnInsertKeyPressed;
             insertKeyAction.Enable();
 
             // Patches
             System.Type[] patches = new System.Type[] {
-                typeof(Plugin), typeof(SpeedPatch), typeof(JumpPatch)
+                typeof(Plugin), typeof(SpeedPatch), typeof(JumpPatch), typeof(ReachPatch), typeof(GodPatch)
             };
             foreach (System.Type patch in patches) harmony.PatchAll(patch);
 
@@ -49,7 +63,19 @@ namespace SkivMod
 
         private void setBinding()
         {
-            speedKeyBind = Config.Bind("Hotkey", "Toggle Key", "N", "Hotkey to toggle speed/jumps");
+            modKeyBind = Config.Bind("Hotkey", "Toggle Mod", "N", "Hotkey to toggle mods");
+            // Speed
+            enableSpeedMod = Config.Bind("Speed", "Enable speed mod", true, "Enable speed mod");
+            enableStaminaMod = Config.Bind("Speed", "Disable stamina consumption", true, "Disables consuming stamina");
+            moveSpeedValue = Config.Bind("Speed", "Move Speed", 9.2f, "Change movement speed");
+            // Jump
+            enableJumpMod = Config.Bind("Jump", "Enable jump mod", true, "Enable custom jumps");
+            maxJumpLimit = Config.Bind("Jump", "Max jumps", -1, "Max multi-jumps (-1 for no limit)");
+            noFallToggle = Config.Bind("Jump", "No fall", true, "Enable no fall");
+            // Reach
+            enableReachMod = Config.Bind("Reach", "Enable reach", false, "Enable long reach");
+            // God
+            enableGodMod = Config.Bind("Godmode", "Enable god mode", false, "Enable god mode");
         }
 
         private void OnInsertKeyPressed(InputAction.CallbackContext obj)
@@ -59,8 +85,8 @@ namespace SkivMod
 
             SpeedPatch.toggled = !SpeedPatch.toggled;
             JumpPatch.toggled = !JumpPatch.toggled;
-            mls.LogInfo($"Speed Patch {(SpeedPatch.toggled ? "enabled" : "disabled")}");
-            mls.LogInfo($"Jump Patch {(JumpPatch.toggled ? "enabled" : "disabled")}");
+            ReachPatch.toggled = !ReachPatch.toggled;
+            GodPatch.toggled = !GodPatch.toggled;
         }
     }
 }
@@ -74,40 +100,86 @@ namespace SkivMultimod.Patches
         [HarmonyPostfix]
         private static void speedPatch(PlayerControllerB __instance)
         {
-            if (toggled)
+            // Speed
+            if (toggled && Plugin.enableSpeedMod.Value)
             {
-                __instance.movementSpeed = 10f;
+                __instance.movementSpeed = Plugin.moveSpeedValue.Value;
             }
             else
             {
-                __instance.movementSpeed = 5f;
+                __instance.movementSpeed = 4.6f; // Default speed is 4.6f
             }
+            // Stamina consumption
+            if (toggled && Plugin.enableStaminaMod.Value)
+            {
+                __instance.sprintMeter = 1f;
+            }
+            
         }
     }
 
     [HarmonyPatch(typeof(PlayerControllerB), "Update")]
     internal class JumpPatch
     {
-        // Based on https://thunderstore.io/c/lethal-company/p/PugRoll/TripleJump/
-        // Modified for infinite jumps
+        // Initially based on https://thunderstore.io/c/lethal-company/p/PugRoll/TripleJump/
+        // Modified for custom jumps and no fall
         internal static bool toggled;
+        internal static int maxJumps = Plugin.maxJumpLimit.Value;
         [HarmonyPostfix]
         public static void infiniteJump(ref bool ___isJumping, ref bool ___isFallingFromJump, ref bool ___isExhausted, PlayerControllerB __instance, ref float ___sprintMeter, ref bool ___isFallingNoJump)
         {
-            if (toggled && !___isExhausted && (___isFallingFromJump | ___isFallingNoJump) && ((ButtonControl)Keyboard.current.spaceKey).wasPressedThisFrame)
+
+            // No fall damage
+            __instance.takingFallDamage = !(toggled && Plugin.noFallToggle.Value);
+
+
+            // Jump mod
+            if (!Plugin.enableJumpMod.Value) return;
+            if (toggled && (maxJumps > 0 || maxJumps < 0) && (___isFallingFromJump | ___isFallingNoJump) && ((ButtonControl)Keyboard.current.spaceKey).wasPressedThisFrame)
             {
+                maxJumps--;
                 __instance.StartCoroutine("PlayerJump");
-                //___sprintMeter = Mathf.Clamp(___sprintMeter - 0.08f, 0f, 1f);
                 ___isJumping = true;
             }
+            if (__instance.thisController.isGrounded)
+            {
+                maxJumps = Plugin.maxJumpLimit.Value;
+            }
 
-            // Saved for future use when implementing UI, customize # of jumps maximum
-            //public static int limitJumps = 2; declare before function
-            //if (__instance.thisController.isGrounded)
-            //{
-            //    limitJumps = 0;
-            //}
         }
 
     }
+
+    [HarmonyPatch(typeof(PlayerControllerB), "Update")]
+    internal class ReachPatch
+    {
+        internal static bool toggled;
+        [HarmonyPostfix]
+        private static void reachPatch(PlayerControllerB __instance)
+        {
+            if (toggled && Plugin.enableReachMod.Value)
+            {
+                __instance.grabDistance = float.MaxValue;
+            }
+            else
+            {
+                __instance.grabDistance = 3f;
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerControllerB), "Update")]
+    [HarmonyPatch("AllowPlayerDeath")]
+    internal class GodPatch
+    {
+        internal static bool toggled;
+        [HarmonyPrefix]
+        static bool OverrideDeath()
+        {
+            return !(toggled && Plugin.enableGodMod.Value);
+        }
+    }
+    
+
+
 }
